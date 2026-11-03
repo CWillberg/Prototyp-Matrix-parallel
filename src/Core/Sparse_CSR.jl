@@ -7,6 +7,7 @@ module Sparse_CSR
 using Adapt: Adapt, @adapt_structure
 using KernelAbstractions: @kernel, @index, @Const, get_backend, synchronize
 using LinearAlgebra: LinearAlgebra
+using TimerOutputs: @timeit
 using SparseArrays: SparseMatrixCSC, sparse
 
 export CSRMatrix, n_rows, n_cols, nnz_csr, to_sparse, launch!
@@ -72,7 +73,7 @@ end
 Computes `y = K x` with one work item per row (no write conflicts).
 """
 function LinearAlgebra.mul!(y::AbstractVector, K::CSRMatrix, x::AbstractVector)
-    launch!(spmv_kernel!, y, K.n_rows, y, K.rowptr, K.colval, K.nzval, x)
+    @timeit "SpMV" launch!(spmv_kernel!, y, K.n_rows, y, K.rowptr, K.colval, K.nzval, x)
     return y
 end
 

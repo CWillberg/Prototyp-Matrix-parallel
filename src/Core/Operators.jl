@@ -6,6 +6,7 @@ module Operators
 
 using KernelAbstractions: @kernel, @index, @Const
 using LinearAlgebra: LinearAlgebra
+using TimerOutputs: @timeit
 using ..Sparse_CSR: CSRMatrix, launch!
 using ..Dof_Sets: DofSet
 
@@ -51,8 +52,8 @@ end
 
 function LinearAlgebra.mul!(y::AbstractVector, A::ConstrainedOperator, x::AbstractVector)
     K = A.K
-    launch!(constrained_spmv_kernel!, y, K.n_rows, y, K.rowptr, K.colval, K.nzval,
-            A.prescribed.mask, x)
+    @timeit "SpMV constrained" launch!(constrained_spmv_kernel!, y, K.n_rows, y, K.rowptr,
+                                       K.colval, K.nzval, A.prescribed.mask, x)
     return y
 end
 
@@ -99,8 +100,9 @@ end
 
 function LinearAlgebra.mul!(y::AbstractVector, A::SubOperator, x::AbstractVector)
     K = A.K
-    launch!(sub_spmv_kernel!, y, K.n_rows, y, K.rowptr, K.colval, K.nzval, A.rows.mask,
-            A.cols.mask, A.complement_rows, A.complement_cols, x)
+    @timeit "SpMV sub-block" launch!(sub_spmv_kernel!, y, K.n_rows, y, K.rowptr, K.colval,
+                                     K.nzval, A.rows.mask, A.cols.mask, A.complement_rows,
+                                     A.complement_cols, x)
     return y
 end
 
@@ -133,7 +135,8 @@ values are inserted exactly afterwards with `apply_prescribed!`.
 """
 function constrained_rhs!(b::AbstractVector, K::CSRMatrix, prescribed::DofSet,
                           u::AbstractVector, f::AbstractVector)
-    launch!(rhs_kernel!, b, K.n_rows, b, K.rowptr, K.colval, K.nzval, prescribed.mask, u, f)
+    @timeit "rhs" launch!(rhs_kernel!, b, K.n_rows, b, K.rowptr, K.colval, K.nzval,
+                          prescribed.mask, u, f)
     return b
 end
 
@@ -148,7 +151,8 @@ end
 Inserts the prescribed values `u` into the solution `x` (exact, no rounding).
 """
 function apply_prescribed!(x::AbstractVector, prescribed::DofSet, u::AbstractVector)
-    launch!(apply_prescribed_kernel!, x, length(x), x, prescribed.mask, u)
+    @timeit "apply prescribed" launch!(apply_prescribed_kernel!, x, length(x), x,
+                                       prescribed.mask, u)
     return x
 end
 
@@ -173,8 +177,8 @@ Reaction forces at the prescribed degrees of freedom from the full matrix
 """
 function reactions!(r::AbstractVector, K::CSRMatrix, prescribed::DofSet,
                     u::AbstractVector, f::AbstractVector)
-    launch!(reaction_kernel!, r, K.n_rows, r, K.rowptr, K.colval, K.nzval, prescribed.mask,
-            u, f)
+    @timeit "reactions" launch!(reaction_kernel!, r, K.n_rows, r, K.rowptr, K.colval,
+                                K.nzval, prescribed.mask, u, f)
     return r
 end
 

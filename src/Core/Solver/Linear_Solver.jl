@@ -5,6 +5,7 @@
 module Linear_Solver
 
 using Krylov: GmresWorkspace, krylov_solve!, solution, statistics
+using TimerOutputs: @timeit
 
 export LinearSolverWorkspace, solve_linear!
 
@@ -35,12 +36,14 @@ preconditioner `M` (README A5.3, selection postponed, F7).
 function solve_linear!(workspace::LinearSolverWorkspace, A, b::AbstractVector;
                        rtol::Float64 = 1e-10, atol::Float64 = 0.0, itmax::Int64 = 0,
                        restart::Bool = true, preconditioner = nothing)
-    if isnothing(preconditioner)
-        krylov_solve!(workspace.gmres, A, b; rtol = rtol, atol = atol, itmax = itmax,
-                      restart = restart)
-    else
-        krylov_solve!(workspace.gmres, A, b; M = preconditioner, rtol = rtol, atol = atol,
-                      itmax = itmax, restart = restart)
+    @timeit "solver (Krylov GMRES)" begin
+        if isnothing(preconditioner)
+            krylov_solve!(workspace.gmres, A, b; rtol = rtol, atol = atol, itmax = itmax,
+                          restart = restart)
+        else
+            krylov_solve!(workspace.gmres, A, b; M = preconditioner, rtol = rtol,
+                          atol = atol, itmax = itmax, restart = restart)
+        end
     end
     return solution(workspace.gmres), statistics(workspace.gmres)
 end

@@ -10,6 +10,7 @@ KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 Krylov = "ba0b0d4f-ebba-5204-a429-3ac8c609bfb7"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 
 [compat]
 Adapt = "4"
@@ -18,6 +19,7 @@ KernelAbstractions = "0.10"
 Krylov = "0.10"
 LinearAlgebra = "1"
 SparseArrays = "1"
+TimerOutputs = "1.2.2"
 julia = "1.10"
 
 [extras]

@@ -7,6 +7,7 @@ module Matrix_Assembly
 using Adapt: Adapt, @adapt_structure
 using ArraysOfArrays: VectorOfVectors, flatview
 using KernelAbstractions: @kernel, @index, @Const
+using TimerOutputs: @timeit
 using ..Sparse_CSR: CSRMatrix, launch!
 
 export AssemblyPattern, create_assembly_pattern, create_matrix, create_element_buffer,
@@ -66,6 +67,7 @@ function create_assembly_pattern(row_dofs::AbstractVector{<:AbstractVector{Int64
     if length(col_dofs) != n_el
         throw(ArgumentError("row_dofs and col_dofs must have one entry per element."))
     end
+    @timeit "symbolic phase" begin
     ke_ptr = Vector{Int64}(undef, n_el + 1)
     ke_ptr[1] = 1
     for e in 1:n_el
@@ -80,6 +82,7 @@ function create_assembly_pattern(row_dofs::AbstractVector{<:AbstractVector{Int64
     end
     src = sortperm(keys)
     rowptr, colval, src_ptr = compress_keys(keys, src, n_dofs)
+    end
     return AssemblyPattern(n_dofs, ke_ptr, src_ptr, src, rowptr, colval)
 end
 
@@ -152,8 +155,8 @@ Numerical phase: writes the sums of the element values into `K.nzval`. No alloca
 pattern unchanged (README A2.5, A4.4).
 """
 function assemble!(K::CSRMatrix, pattern::AssemblyPattern, ke::AbstractVector)
-    launch!(gather_kernel!, K.nzval, length(K.nzval), K.nzval, pattern.src_ptr,
-            pattern.src, ke)
+    @timeit "assemble (gather)" launch!(gather_kernel!, K.nzval, length(K.nzval), K.nzval,
+                                        pattern.src_ptr, pattern.src, ke)
     return K
 end
 

@@ -5,6 +5,7 @@
 module Element_Interface
 
 using KernelAbstractions: @kernel, @index, @Const
+using TimerOutputs: @timeit
 using ...Sparse_CSR: launch!
 using ...Matrix_Assembly: AssemblyPattern
 
@@ -48,7 +49,8 @@ elements are independent; the buffer positions come from the pattern.
 """
 function compute_elements!(ke::AbstractVector, pattern::AssemblyPattern,
                            el::AbstractElement, data)
-    launch!(element_kernel!, ke, length(pattern.ke_ptr) - 1, el, ke, pattern.ke_ptr, data)
+    @timeit "compute elements" launch!(element_kernel!, ke, length(pattern.ke_ptr) - 1, el,
+                                       ke, pattern.ke_ptr, data)
     return ke
 end
 
