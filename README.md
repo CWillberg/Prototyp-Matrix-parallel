@@ -3,6 +3,39 @@
 Prototyp zum Aufbau und Lösen einer dünnbesetzten Systemmatrix (Steifigkeitsmatrix)
 für Peridynamik-Simulationen in Julia, verteilt über MPI und lauffähig auf CUDA-GPUs.
 
+## Stand
+
+| Bereich | Stand | Ort |
+|---|---|---|
+| CSR-Matrix, SpMV (CPU/GPU) | fertig | `src/Core/Sparse_CSR.jl` |
+| Assemblierung, modellunabhängig (symbolisch + Gather ohne Atomics) | fertig, auch für Elemente mit fremden Zeilen getestet | `src/Core/Matrix_Assembly.jl` |
+| Element-Schnittstelle + Plugin-Suche | fertig | `src/Models/Elements/` |
+| Bond-based Elastic (1D/2D/3D) | fertig | `src/Models/Elements/BondBased/` |
+| DOF-Mengen, maskierte Operatoren, RB ohne Teilmatrizen | fertig | `src/Core/Dof_Sets.jl`, `src/Core/Operators.jl` |
+| GMRES (Krylov.jl), Vorkonditionierer-Schnittstelle | fertig | `src/Core/Solver/` |
+| Guyan: explizit (`extract`) und matrixfrei (`SchurOperator`) | fertig | `src/Core/Model_reduction/` |
+| Ordinary, Korrespondenz, IGA-PD | offen (Schnittstelle vorbereitet) | – |
+| Craig-Bampton | offen | – |
+| MPI (PartitionedArrays) | offen | – |
+
+## Nutzung
+
+```sh
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
+julia --project=. -e 'using Pkg; Pkg.test()'        # inkl. GPU, wenn CUDA funktioniert
+PD_MATRIX_TEST_GPU=false julia --project=. -e 'using Pkg; Pkg.test()'   # nur CPU
+julia --project=. examples/bb_bar.jl                 # Referenzbeispiel A7.1a
+julia -e 'using JuliaFormatter; format(".")'         # Formatierung (sciml)
+```
+
+Ablauf (siehe `test/helper.jl`, `solve_bar`):
+
+1. Host, symbolisch: `element_dofs(el, data)` → `create_assembly_pattern` (einmal).
+2. `adapt(CuArray, pattern)`, `adapt(CuArray, data)` für die GPU (oder `Array` für CPU).
+3. Numerisch: `compute_elements!(ke, pattern, el, data)` → `assemble!(K, pattern, ke)`.
+4. RB: `create_dof_set`, `constrained_rhs!`, `solve_linear!(ws, ConstrainedOperator(K, bc), b)`,
+   `apply_prescribed!`, `reactions!`.
+
 ## Anforderungen
 
 ### A0 – Struktur, Stil und Architektur (Vorbild: PeriLab)
@@ -150,8 +183,26 @@ später ohne Umbau übernommen werden kann.
   - Bei gleichmäßiger Diskretisierung ist das Ergebnis symmetrisch; durch unterschiedliche
     Volumina `V_j`, Horizonte oder Schädigung `ω_ij` wird es nicht-symmetrisch. Das eignet
     sich gut als Test für A2.2.
-- **A3.6** Weitere Modelle (state-based, Korrespondenz) folgen später über dieselbe
-  Schnittstelle, ohne die Assemblierung zu ändern.
+- **A3.6** Die Basis muss von Anfang an folgende Elementtypen tragen, ohne die
+  Assemblierung zu ändern (implementiert wird zunächst nur A3.5):
+
+  | Elementtyp | Integrationspunkt | `row_dofs` | `col_dofs` | schreibt in fremde Zeilen |
+  |---|---|---|---|---|
+  | bond-based (A3.5) | Materialpunkt `i` | `i` | `{i} ∪ H_i` | nein |
+  | ordinary state-based | Materialpunkt `i` | `{i} ∪ H_i` (Kraftzustand `T_i⟨ξ⟩` wirkt auf `i` und `j`) | `{i} ∪ H_i` (Dilatation `θ_i`) | ja |
+  | Korrespondenz | Materialpunkt `i` | `{i} ∪ H_i` | `{i} ∪ H_i` (Formtensor, Deformationsgradient) | ja |
+  | IGA-PD | Gauß-Punkt `x` der äußeren Integration | Kontrollpunkte mit `N_I(x) ≠ 0` | Kontrollpunkte aller Elemente im Horizont `[x−δ, x+δ]` | ja |
+
+- **A3.7** Folgen für die Schnittstelle:
+  - Freiheitsgrade gehören zu **DOF-Trägern** (Materialpunkte *oder* Kontrollpunkte). Ein
+    Element ist an einen Integrationspunkt gebunden, nicht zwingend an einen DOF-Träger.
+  - `row_dofs` und `col_dofs` sind beliebige Listen; `K_e` ist dicht und rechteckig
+    (IGA-PD: `K_e = w_x · N(x) · g(x)ᵀ`, siehe IGA_PD `bar_plane/src/IGAPD.jl`).
+  - Einträge in Zeilen fremder Ranks (A4.0b) sind damit **Pflicht**, nicht optional.
+  - Ein Element meldet seine DOF-Listen in einer symbolischen Phase einmal an
+    (`element_dofs`); die numerische Phase liefert nur noch Werte in fester Reihenfolge.
+  - Referenz für IGA-PD: Projekt `IGA_PD` (`~/julia_projects/IGA_PD`), 1D-Stab und 2D in
+    `bar_plane/`, Schale in `shell/`; dort bisher dichte Matrizen und seriell.
 
 ### A4 – Aufbau (Assemblierung)
 - **A4.0** Die Assemblierung kennt kein Materialmodell. Sie verteilt nur die Werte der
@@ -173,6 +224,21 @@ später ohne Umbau übernommen werden kann.
   schreiben.
 - **A4.4** Keine Host↔Device-Kopien der Matrix während der Assemblierung.
 
+### A4a – Modellreduktion
+- **A4a.1** Die Basis muss Modellreduktion erlauben: statische Kondensation (Guyan) und
+  Craig-Bampton wie in PeriLab `src/Core/Model_reduction/` (`reduce_matrices(K, M, m, s, n_modes)`).
+- **A4a.2** Master- (`m`) und kondensierte (`s`) DOFs werden wie die Randbedingungen als
+  **DOF-Mengen** (Maske) beschrieben. Eine gemeinsame Abstraktion für RB und Reduktion.
+- **A4a.3** Operatoren auf Teilmengen ohne Kopie: `K_ab · x` für beliebige Mengen `a, b`
+  als maskiertes SpMV auf der Gesamtmatrix (wie A6.4). Damit lassen sich `T = −K_ss⁻¹ K_sm`
+  und `K_r = K_mm + K_ms T` iterativ anwenden, ohne Teilmatrizen zu bilden.
+- **A4a.4** Wo ein Verfahren eine explizite Teilmatrix braucht (Faktorisierung von `K_ss`,
+  Eigenwertproblem bei Craig-Bampton), gibt es eine **ausdrückliche** Extraktion
+  `extract(K, a, b)`. Sie ist der einzige Ort, an dem Teilmatrizen alloziert werden, und wird
+  nie implizit (z. B. durch Randbedingungen) aufgerufen.
+- **A4a.5** Optionale Umnummerierung, sodass die DOFs einer Menge zusammenhängen
+  (PeriLab `create_permutation`); die Zuordnung alt ↔ neu wird gespeichert.
+
 ### A5 – Lösung
 - **A5.1** Lösung des linearen Systems `K u = f` für nicht-symmetrische Matrizen mit
   iterativen Krylov-Verfahren (GMRES, BiCGStab).
@@ -191,8 +257,11 @@ später ohne Umbau übernommen werden kann.
 - **A6.4** Vorgeschlagenes Verfahren: maskierter Operator
   - Anwendung: `y = M_f · K · (M_f · x) + M_p · x` (M = Diagonalmaske, nur als Bitvektor
     gespeichert, in den SpMV-Kernel integriert)
-  - rechte Seite: `b = M_f · (f − K · (M_p · u_p))` + `M_p · u_p`
-  - Damit ist nur ein Arbeitsvektor nötig, keine zusätzliche Matrix.
+  - rechte Seite (homogene Form): `b = M_f · (f − K · (M_p · u_p))`, also `b_p = 0`
+  - Danach `u_p` exakt einsetzen (`apply_prescribed!`). Da `b_p = 0` und der Operator auf
+    `p` die Identität ist, bleiben alle Krylov-Vektoren dort exakt 0; die vorgegebenen
+    Werte sind damit ohne Rundungsfehler erfüllt.
+  - Damit ist kein Arbeitsvektor und keine zusätzliche Matrix nötig.
 - **A6.5** Reaktionskräfte an den vorgegebenen Freiheitsgraden sind aus der vollen Matrix
   berechenbar (`r_p = M_p · (K u − f)`).
 
