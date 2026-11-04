@@ -39,8 +39,10 @@ end
 
 function run_solve(n; memory = 50, rtol = 1e-10)
     data = bar_data(n)
-    p = [1, n]; u_p = [0.0, 100.0]
-    f = zeros(n); f[div(n, 2)] = 10.0
+    p = [1, n]
+    u_p = [0.0, 100.0]
+    f = zeros(n)
+    f[div(n, 2)] = 10.0
     Kref = reference_assembly(data, n)
 
     reference_solve(Kref, p, u_p, f)
@@ -54,21 +56,29 @@ function run_solve(n; memory = 50, rtol = 1e-10)
     results = Dict{String,Any}()
     for (name, AT) in (("CPU", Array), ("GPU", CuArray))
         AT === CuArray && !CUDA.functional() && continue
-        pat = adapt(AT, host_pattern); d = adapt(AT, data)
-        K = create_matrix(pat); ke = create_element_buffer(pat)
-        compute_elements!(ke, pat, el, d); assemble!(K, pat, ke)
+        pat = adapt(AT, host_pattern)
+        d = adapt(AT, data)
+        K = create_matrix(pat)
+        ke = create_element_buffer(pat)
+        compute_elements!(ke, pat, el, d)
+        assemble!(K, pat, ke)
         bc = adapt(AT, create_dof_set(p, n))
-        u_full = zeros(n); u_full[p] = u_p
-        u_full = adapt(AT, u_full); fd = adapt(AT, f)
-        b = similar(fd); r = similar(fd)
+        u_full = zeros(n)
+        u_full[p] = u_p
+        u_full = adapt(AT, u_full)
+        fd = adapt(AT, f)
+        b = similar(fd)
+        r = similar(fd)
         ws = LinearSolverWorkspace(n, typeof(b); memory = memory)
         own_solve!(ws, K, bc, u_full, fd, b, r; rtol = rtol)
-        stat = AT === CuArray ? CUDA.@timed(own_solve!(ws, K, bc, u_full, fd, b, r; rtol = rtol)) :
+        stat = AT === CuArray ?
+               CUDA.@timed(own_solve!(ws, K, bc, u_full, fd, b, r; rtol = rtol)) :
                @timed(own_solve!(ws, K, bc, u_full, fd, b, r; rtol = rtol))
         u, stats = stat.value
         err = norm(Array(u) - ref.value) / norm(ref.value)
         bytes = AT === CuArray ? stat.cpu_bytes + stat.gpu_bytes : stat.bytes
-        results[name] = (t = stat.time * 1e3, it = stats.niter, ok = stats.solved, err = err,
+        results[name] = (t = stat.time * 1e3, it = stats.niter, ok = stats.solved,
+                         err = err,
                          mb = bytes / 2^20)
     end
     @printf("%8d | %9.2f %9.2f %8.2f | ", n, ref.time * 1e3, ref.bytes / 2^20,

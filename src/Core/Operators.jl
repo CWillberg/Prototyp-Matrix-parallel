@@ -24,11 +24,16 @@ i.e. `K_ff` on the free part and the identity on the prescribed part. The matrix
 unchanged, so the prescribed set can change between load steps (README A6.3).
 
 The same operator restricted to the complement of a master set is `K_ss` of a model
-reduction (README A4a.3).
+reduction (README A4a.3). On an MPI rank `n_own` is the number of own rows; ghost rows
+(partial sums sent back to the owners) get no identity part.
 """
 struct ConstrainedOperator{M<:CSRMatrix,S<:DofSet}
     K::M
     prescribed::S
+    n_own::Int64
+end
+function ConstrainedOperator(K::CSRMatrix, prescribed::DofSet; n_own::Int64 = K.n_rows)
+    return ConstrainedOperator(K, prescribed, n_own)
 end
 
 Base.size(A::ConstrainedOperator) = size(A.K)
@@ -36,10 +41,11 @@ Base.size(A::ConstrainedOperator, d::Integer) = size(A.K, d)
 Base.eltype(A::ConstrainedOperator) = eltype(A.K)
 
 @kernel function constrained_spmv_kernel!(y, @Const(rowptr), @Const(colval), @Const(nzval),
-                                          @Const(prescribed), @Const(x))
+                                          @Const(prescribed), @Const(x), n_own::Int64)
     i = @index(Global)
     if prescribed[i]
-        @inbounds y[i] = x[i]
+        # identity on own prescribed rows; ghost rows contribute nothing to them
+        @inbounds y[i] = i <= n_own ? x[i] : zero(eltype(y))
     else
         s = zero(eltype(y))
         @inbounds for k in rowptr[i]:(rowptr[i + 1] - 1)
@@ -53,7 +59,8 @@ end
 function LinearAlgebra.mul!(y::AbstractVector, A::ConstrainedOperator, x::AbstractVector)
     K = A.K
     @timeit "SpMV constrained" launch!(constrained_spmv_kernel!, y, K.n_rows, y, K.rowptr,
-                                       K.colval, K.nzval, A.prescribed.mask, x)
+                                       K.colval, K.nzval, A.prescribed.mask, x,
+                                       A.n_own)
     return y
 end
 

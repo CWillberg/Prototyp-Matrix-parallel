@@ -21,21 +21,27 @@ only where every value of every element matrix ends up.
 
 Element `e` writes its dense matrix `K_e` (size `|row_dofs[e]| × |col_dofs[e]|`, column
 major) into the flat element buffer starting at `ke_ptr[e]`. Every stored entry `p` of the
-global matrix is the sum of the buffer values `src[src_ptr[p]:(src_ptr[p+1]-1)]`.
+matrix is the sum of the buffer values `src[src_ptr[p]:(src_ptr[p+1]-1)]`.
 
 Assembly is therefore a *gather*: one work item per matrix entry, no atomics, no write
 conflicts, and the summation order is fixed (bitwise reproducible), also when elements
 write into the same rows (correspondence, ordinary state-based, IGA-PD; README A3.6).
 
+On an MPI rank the local matrix has the own rows followed by the ghost rows (partial sums
+of elements that write into rows of neighbours, README A4.0b); the columns are the own
+plus the ghost degrees of freedom in local numbering (README A4.2). Columns are sorted
+within each row.
+
 # Fields
-- `n_dofs::Int64`: Number of rows and columns
+- `n_rows::Int64`, `n_cols::Int64`: Matrix size
 - `ke_ptr::Vi`: Start of each element matrix in the element buffer, length `n_elements + 1`
 - `src_ptr::Vi`: Start of the contributions of each matrix entry in `src`, length `nnz + 1`
 - `src::Vi`: Element buffer positions, sorted by matrix entry
-- `rowptr::Vi`, `colval::Vi`: CSR pattern of the global matrix
+- `rowptr::Vi`, `colval::Vi`: CSR pattern
 """
 struct AssemblyPattern{Vi<:AbstractVector{Int64}}
-    n_dofs::Int64
+    n_rows::Int64
+    n_cols::Int64
     ke_ptr::Vi
     src_ptr::Vi
     src::Vi
@@ -48,7 +54,7 @@ n_elements(pattern::AssemblyPattern) = length(pattern.ke_ptr) - 1
 n_element_values(pattern::AssemblyPattern) = Int64(Array(pattern.ke_ptr[end:end])[1] - 1)
 
 """
-    create_assembly_pattern(row_dofs, col_dofs, n_dofs)
+    create_assembly_pattern(row_dofs, col_dofs, n_rows, n_cols = n_rows)
 
 Symbolic phase on the host. Builds the CSR pattern and the gather map from the degrees of
 freedom each element writes into (`row_dofs`) and depends on (`col_dofs`).
@@ -56,49 +62,54 @@ freedom each element writes into (`row_dofs`) and depends on (`col_dofs`).
 # Arguments
 - `row_dofs::VectorOfVectors{Int64}`: Row degrees of freedom per element
 - `col_dofs::VectorOfVectors{Int64}`: Column degrees of freedom per element
-- `n_dofs::Int64`: Total number of degrees of freedom
+- `n_rows::Int64`: Number of rows (own degrees of freedom)
+- `n_cols::Int64`: Number of columns (own + ghost degrees of freedom)
 # Returns
 - `pattern::AssemblyPattern`: Host pattern; move it to a device with `Adapt.adapt`
 """
 function create_assembly_pattern(row_dofs::AbstractVector{<:AbstractVector{Int64}},
                                  col_dofs::AbstractVector{<:AbstractVector{Int64}},
-                                 n_dofs::Int64)
+                                 n_rows::Int64, n_cols::Int64 = n_rows)
     n_el = length(row_dofs)
     if length(col_dofs) != n_el
         throw(ArgumentError("row_dofs and col_dofs must have one entry per element."))
     end
     @timeit "symbolic phase" begin
-    ke_ptr = Vector{Int64}(undef, n_el + 1)
-    ke_ptr[1] = 1
-    for e in 1:n_el
-        ke_ptr[e + 1] = ke_ptr[e] + length(row_dofs[e]) * length(col_dofs[e])
-    end
-    n_values = ke_ptr[end] - 1
+        ke_ptr = Vector{Int64}(undef, n_el + 1)
+        ke_ptr[1] = 1
+        for e in 1:n_el
+            ke_ptr[e + 1] = ke_ptr[e] + length(row_dofs[e]) * length(col_dofs[e])
+        end
+        n_values = ke_ptr[end] - 1
 
-    # one key per element value; sorting the keys groups the values of each matrix entry
-    keys = Vector{Int64}(undef, n_values)
-    for e in 1:n_el
-        fill_keys!(keys, ke_ptr[e], row_dofs[e], col_dofs[e], n_dofs)
+        # one key per element value; sorting groups the values of each matrix entry
+        keys = Vector{Int64}(undef, n_values)
+        for e in 1:n_el
+            fill_keys!(keys, ke_ptr[e], row_dofs[e], col_dofs[e], n_rows, n_cols)
+        end
+        src = sortperm(keys)
+        rowptr, colval, src_ptr = compress_keys(keys, src, n_rows, n_cols)
     end
-    src = sortperm(keys)
-    rowptr, colval, src_ptr = compress_keys(keys, src, n_dofs)
-    end
-    return AssemblyPattern(n_dofs, ke_ptr, src_ptr, src, rowptr, colval)
+    return AssemblyPattern(n_rows, n_cols, ke_ptr, src_ptr, src, rowptr, colval)
 end
 
 function fill_keys!(keys::Vector{Int64}, start::Int64, rows::AbstractVector{Int64},
-                    cols::AbstractVector{Int64}, n_dofs::Int64)
+                    cols::AbstractVector{Int64}, n_rows::Int64, n_cols::Int64)
     n_r = length(rows)
     for (jc, c) in enumerate(cols), (ir, r) in enumerate(rows)
-        if !(1 <= r <= n_dofs && 1 <= c <= n_dofs)
-            throw(ArgumentError("Degree of freedom ($r, $c) outside 1:$n_dofs."))
+        if !(1 <= r <= n_rows)
+            throw(ArgumentError("Row $r outside 1:$n_rows."))
         end
-        keys[start + (jc - 1) * n_r + ir - 1] = (r - 1) * n_dofs + c
+        if !(1 <= c <= n_cols)
+            throw(ArgumentError("Column $c outside 1:$n_cols."))
+        end
+        keys[start + (jc - 1) * n_r + ir - 1] = (r - 1) * n_cols + c
     end
 end
 
-function compress_keys(keys::Vector{Int64}, src::Vector{Int64}, n_dofs::Int64)
-    rowptr = zeros(Int64, n_dofs + 1)
+function compress_keys(keys::Vector{Int64}, src::Vector{Int64}, n_rows::Int64,
+                       n_cols::Int64)
+    rowptr = zeros(Int64, n_rows + 1)
     colval = Int64[]
     src_ptr = Int64[]
     last_key = -1
@@ -106,8 +117,8 @@ function compress_keys(keys::Vector{Int64}, src::Vector{Int64}, n_dofs::Int64)
         key = keys[k]
         key == last_key && continue
         last_key = key
-        row = div(key - 1, n_dofs) + 1
-        push!(colval, key - (row - 1) * n_dofs)
+        row = div(key - 1, n_cols) + 1
+        push!(colval, key - (row - 1) * n_cols)
         push!(src_ptr, q)
         rowptr[row + 1] += 1
     end
@@ -120,12 +131,12 @@ end
 """
     create_matrix(pattern)
 
-Allocates the global matrix for a pattern on the pattern's backend (values zero).
+Allocates the matrix for a pattern on the pattern's backend (values zero).
 """
 function create_matrix(pattern::AssemblyPattern; T::Type = Float64)
     nzval = similar(pattern.colval, T)
     fill!(nzval, zero(T))
-    return CSRMatrix(pattern.n_dofs, pattern.n_dofs, pattern.rowptr, pattern.colval, nzval)
+    return CSRMatrix(pattern.n_rows, pattern.n_cols, pattern.rowptr, pattern.colval, nzval)
 end
 
 """

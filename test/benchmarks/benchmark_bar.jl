@@ -27,13 +27,19 @@ end
 
 # Referenz: COO-Tripel + sparse() wie im seriellen PeriLab-Pfad
 function reference_assembly(data, n)
-    I = Int64[]; J = Int64[]; V = Float64[]
+    I = Int64[]
+    J = Int64[]
+    V = Float64[]
     x = data.coordinates
     for i in 1:n, b in data.nlist_ptr[i]:(data.nlist_ptr[i + 1] - 1)
         j = data.nlist[b]
         k = data.bond_constant[i] * data.volume[j] / abs(x[1, j] - x[1, i])
-        push!(I, i); push!(J, i); push!(V, k)
-        push!(I, i); push!(J, j); push!(V, -k)
+        push!(I, i)
+        push!(J, i)
+        push!(V, k)
+        push!(I, i)
+        push!(J, j)
+        push!(V, -k)
     end
     return sparse(I, J, V, n, n)
 end
@@ -57,10 +63,12 @@ function run(n)
 
     t_ref_asm = best_time(() -> reference_assembly(data, n))
     Kref = reference_assembly(data, n)
-    x = rand(n); y = zeros(n)
+    x = rand(n)
+    y = zeros(n)
     t_ref_mv = best_time(() -> mul!(y, Kref, x); repeats = 20)
 
-    K = create_matrix(host_pattern); ke = create_element_buffer(host_pattern)
+    K = create_matrix(host_pattern)
+    ke = create_element_buffer(host_pattern)
     t_cpu_asm = best_time(() -> (compute_elements!(ke, host_pattern, el, data);
                                  assemble!(K, host_pattern, ke)))
     t_cpu_mv = best_time(() -> mul!(y, K, x); repeats = 20)
@@ -68,10 +76,14 @@ function run(n)
 
     t_gpu_asm = t_gpu_mv = NaN
     if CUDA.functional()
-        p = adapt(CuArray, host_pattern); d = adapt(CuArray, data)
-        Kg = create_matrix(p); keg = create_element_buffer(p)
-        xg = CuArray(x); yg = similar(xg)
-        t_gpu_asm = best_time(() -> (compute_elements!(keg, p, el, d); assemble!(Kg, p, keg)))
+        p = adapt(CuArray, host_pattern)
+        d = adapt(CuArray, data)
+        Kg = create_matrix(p)
+        keg = create_element_buffer(p)
+        xg = CuArray(x)
+        yg = similar(xg)
+        t_gpu_asm = best_time(() -> (compute_elements!(keg, p, el, d); assemble!(Kg, p,
+                                                                                 keg)))
         t_gpu_mv = best_time(() -> mul!(yg, Kg, xg); repeats = 20)
     end
     @printf("%9d | %8.2f | %9.3f %9.3f %9.3f | %8.4f %8.4f %8.4f\n", n, t_sym * 1e3,

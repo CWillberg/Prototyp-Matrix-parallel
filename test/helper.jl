@@ -132,3 +132,59 @@ function solve_bar(data, D::Int64, prescribed::Vector{Int64}, u_p::Vector{Float6
     reactions!(r, K, bc, u, f_dev)
     return (u = Array(u), r = Array(r), K = K, stats = stats)
 end
+
+"""
+    correspondence_forces(u, data, D, lambda, mu, beta)
+
+Independent reference: force density of the linear correspondence model with bond
+stabilisation, straight from the equations (plain loops, dense matrices).
+"""
+function correspondence_forces(u::Vector{Float64}, data, D::Int64, lambda::Float64,
+                               mu::Float64, beta::Float64)
+    x = data.coordinates
+    n = length(data.nlist_ptr) - 1
+    n_points = size(x, 2)
+    U = reshape(u, D, n_points)
+    f = zeros(D, n_points)
+    for i in 1:n
+        bonds = data.nlist_ptr[i]:(data.nlist_ptr[i + 1] - 1)
+        shape = zeros(D, D)
+        for b in bonds
+            xi = x[:, data.nlist[b]] - x[:, i]
+            shape += data.bond_damage[b] * data.volume[data.nlist[b]] * xi * xi'
+        end
+        Kinv = inv(shape)
+        H = zeros(D, D)
+        for b in bonds
+            j = data.nlist[b]
+            xi = x[:, j] - x[:, i]
+            H += (U[:, j] - U[:, i]) * (data.bond_damage[b] * data.volume[j] * Kinv * xi)'
+        end
+        eps = 0.5 * (H + H')
+        sigma = lambda * sum(eps[k, k] for k in 1:D) * Matrix(1.0I, D, D) + 2mu * eps
+        for b in bonds
+            j = data.nlist[b]
+            omega = data.bond_damage[b]
+            xi = x[:, j] - x[:, i]
+            t = omega * sigma * Kinv * xi
+            z = U[:, j] - U[:, i] - H * xi
+            p = beta * omega * z
+            f[:, i] += (t + p) * data.volume[j]
+            f[:, j] -= (t + p) * data.volume[i]
+        end
+    end
+    return vec(f)
+end
+
+"Reference matrix of the linear correspondence model, column by column from the forces."
+function reference_correspondence(data, D::Int64, lambda::Float64, mu::Float64,
+                                  beta::Float64)
+    n_dofs = D * size(data.coordinates, 2)
+    K = zeros(n_dofs, n_dofs)
+    for k in 1:n_dofs
+        e = zeros(n_dofs)
+        e[k] = 1.0
+        K[:, k] = -correspondence_forces(e, data, D, lambda, mu, beta)   # K u = −f_int
+    end
+    return K
+end

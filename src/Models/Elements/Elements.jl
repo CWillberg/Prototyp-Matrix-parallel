@@ -21,5 +21,7 @@ end
 
 using .Bondbased_Elastic: BondbasedElastic, create_bondbased_data
 export BondbasedElastic, create_bondbased_data
+using .Correspondence_Elastic: CorrespondenceElastic
+export CorrespondenceElastic
 
 end

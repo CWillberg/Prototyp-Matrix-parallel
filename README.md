@@ -14,9 +14,19 @@ für Peridynamik-Simulationen in Julia, verteilt über MPI und lauffähig auf CU
 | DOF-Mengen, maskierte Operatoren, RB ohne Teilmatrizen | fertig | `src/Core/Dof_Sets.jl`, `src/Core/Operators.jl` |
 | GMRES (Krylov.jl), Vorkonditionierer-Schnittstelle | fertig | `src/Core/Solver/` |
 | Guyan: explizit (`extract`) und matrixfrei (`SchurOperator`) | fertig | `src/Core/Model_reduction/` |
-| Ordinary, Korrespondenz, IGA-PD | offen (Schnittstelle vorbereitet) | – |
+| Korrespondenz Elastic (linear, mit Null-Energie-Stabilisierung, 1D–3D, GPU) | fertig | `src/Models/Elements/Correspondence/` |
+| Ordinary, IGA-PD | offen (Schnittstelle und Verteilung vorbereitet) | – |
 | Craig-Bampton | offen | – |
-| MPI (PartitionedArrays) | offen | – |
+| Blockassemblierung (feste RB, A6.6) | offen | – |
+| Status-Maske im Gather (Schädigung, A6a.2) | offen | – |
+| Präfix-Sicht für additive Fertigung (A6a.3) | offen | – |
+| Newton / Wiederverwendung / teilweises Neueinsammeln (A6b) | offen | – |
+| weitere Vorkonditionierer, externe Löser (F7) | offen | – |
+| `@timeit`-Abschnitte (Zeit + Allokation) | fertig | `test/benchmarks/profile_bar.jl` |
+| MPI: verteilte Assemblierung (eigene Zeilen × eigene+Ghost-Spalten), Ghost-Austausch, verteilte Skalarprodukte | fertig (CPU- und GPU-Ranks; Elemente nur mit eigenen Zeilen) | `src/MPI_communication/`, `src/Core/Distributed_Operators.jl` |
+| BiCGStab mit Jacobi (seriell / MPI / GPU, 0 B Allokation in der Iteration) | fertig | `src/Core/Solver/BiCGStab.jl` |
+| Speicherbericht pro Rank | fertig | `src/Support/Memory_Report.jl` |
+| Elemente, die in Nachbarzeilen schreiben, verteilt: 1-Horizont-Ghosts + Rückaddition im Löser (A4.0b) | fertig | `accumulate_ghosts!` in `src/MPI_communication/Halo_Exchange.jl` |
 
 ## Nutzung
 
@@ -26,9 +36,42 @@ julia --project=. -e 'using Pkg; Pkg.test()'        # inkl. GPU, wenn CUDA funkt
 PD_MATRIX_TEST_GPU=false julia --project=. -e 'using Pkg; Pkg.test()'   # nur CPU
 julia --project=. examples/bb_bar.jl                 # Referenzbeispiel A7.1a
 julia -e 'using JuliaFormatter; format(".")'         # Formatierung (sciml)
+julia --project=test/benchmarks -t 1 test/benchmarks/profile_bar.jl 1000       # Zeit/Allokation je Abschnitt
+julia --project=test/benchmarks -t 4 test/benchmarks/profile_bar.jl 1000 gpu   # 4 Threads (WSL-Maximum) bzw. GPU
 ```
 
-Ablauf (siehe `test/helper.jl`, `solve_bar`):
+### Verteilte Testszenarien (MPI)
+
+```sh
+julia --project=test/mpi -e 'using Pkg; Pkg.instantiate()'          # einmal
+julia --project=test/mpi test/mpi/run_scenarios.jl                   # CPU, 1/2/4 Ranks
+julia --project=test/mpi test/mpi/run_scenarios.jl cpu gpu ranks=1,2  # zusätzlich GPU-Ranks
+# einzeln (mpiexec aus MPI.jl: julia -e 'using MPI; println(mpiexec())'):
+mpiexecjl -n 4 julia --project=test/mpi test/mpi/scenarios.jl cpu memory
+mpiexecjl -n 2 julia --project=test/mpi test/mpi/scenarios.jl bc_values timer
+```
+
+| Szenario | Inhalt | Prüfungen |
+|---|---|---|
+| `halo` | Ghost-Austausch, 1D (D = 1) und 2D (D = 2) | Ghost-Werte = Werte der Eigentümer |
+| `bar_uniform` | 1D-Stab, 100 Punkte, u = 0 / 100, F = 10 in der Mitte (A7.1a) | Zeilen von K = Zeilen der seriellen Matrix, u = Referenz, u_p exakt, Reaktionen, Gleichgewicht |
+| `bar_nonsym` | wie oben, ungleiche Volumina | wie oben, Matrix nicht symmetrisch |
+| `plate_2d` | 2D-Platte 24×8, links eingespannt, rechts u_x = 1 | wie `bar_uniform` |
+| `bc_values` | neue RB-Werte und Last ohne Neuaufbau | Lösung = Referenz, Matrixwerte unverändert |
+| `corr_bar` | 1D-Korrespondenz, 60 Punkte, ungleiche Volumina, Stabilisierung | Rückaddition aktiv, verteiltes K·x = serielles K·x, u, u_p exakt, Reaktionen |
+| `corr_plate` | 2D-Korrespondenz 16×6, links eingespannt, rechts u_x = 0.5 | wie `corr_bar` |
+| `memory` | Stab mit 10 000 Punkten, Speichertabelle pro Rank | Σ nnz lokal = nnz global, kein Rank hält die ganze Matrix |
+
+Optionen: `cpu` / `gpu`, Szenarionamen (Standard: alle), `timer` (Zeit und Allokation je
+Abschnitt auf Rank 0, nach einem Aufwärmlauf). Exit-Code 1 bei einem Fehler.
+`Pkg.test()` startet die Szenarien zusätzlich mit 1 und 2 Ranks (abschaltbar mit
+`PD_MATRIX_TEST_MPI=false`).
+
+Auf einem Rechner mit einer GPU teilen sich mehrere GPU-Ranks dieselbe GPU: Das prüft die
+Korrektheit, nicht die Leistung. Ohne CUDA-aware MPI läuft der Ghost-Austausch über
+vorab angelegte Host-Puffer (F6).
+
+Ablauf seriell (siehe `test/helper.jl`, `solve_bar`):
 
 1. Host, symbolisch: `element_dofs(el, data)` → `create_assembly_pattern` (einmal).
 2. `adapt(CuArray, pattern)`, `adapt(CuArray, data)` für die GPU (oder `Array` für CPU).
@@ -186,19 +229,27 @@ später ohne Umbau übernommen werden kann.
 - **A3.6** Die Basis muss von Anfang an folgende Elementtypen tragen, ohne die
   Assemblierung zu ändern (implementiert wird zunächst nur A3.5):
 
-  | Elementtyp | Integrationspunkt | `row_dofs` | `col_dofs` | schreibt in fremde Zeilen |
-  |---|---|---|---|---|
-  | bond-based (A3.5) | Materialpunkt `i` | `i` | `{i} ∪ H_i` | nein |
-  | ordinary state-based | Materialpunkt `i` | `{i} ∪ H_i` (Kraftzustand `T_i⟨ξ⟩` wirkt auf `i` und `j`) | `{i} ∪ H_i` (Dilatation `θ_i`) | ja |
-  | Korrespondenz | Materialpunkt `i` | `{i} ∪ H_i` | `{i} ∪ H_i` (Formtensor, Deformationsgradient) | ja |
-  | IGA-PD | Gauß-Punkt `x` der äußeren Integration | Kontrollpunkte mit `N_I(x) ≠ 0` | Kontrollpunkte aller Elemente im Horizont `[x−δ, x+δ]` | ja |
+  | Elementtyp | Integrationspunkt | `row_dofs` | `col_dofs` | schreibt in Nachbarzeilen | Zeile der zusammengesetzten Matrix reicht |
+  |---|---|---|---|---|---|
+  | bond-based (A3.5) | Materialpunkt `i` | `i` | `{i} ∪ H_i` | nein | 1 Horizont |
+  | ordinary state-based | Materialpunkt `i` | `{i} ∪ H_i` (Kraftzustand `T_i⟨ξ⟩` wirkt auf `i` und `j`) | `{i} ∪ H_i` (Dilatation `θ_i`) | ja | 2 Horizonte |
+  | Korrespondenz | Materialpunkt `i` | `{i} ∪ H_i` | `{i} ∪ H_i` (Formtensor, Deformationsgradient) | ja | 2 Horizonte |
+  | IGA-PD | Gauß-Punkt `x` der äußeren Integration | Kontrollpunkte mit `N_I(x) ≠ 0` | Kontrollpunkte aller Elemente im Horizont `[x−δ, x+δ]` | ja | Träger + Horizont |
+
+  Warum 2 Horizonte: Das Element am Punkt `i` hängt nur von seinen Nachbarn ab (Spannung
+  aus Formtensor und Deformationsgradient an `i`). Die Bondkraft wirkt aber auf beide
+  Enden (`+T_i⟨ξ_ij⟩` auf `i`, `−T_i⟨ξ_ij⟩` auf `j`). Zeile `i` sammelt deshalb auch die
+  Elemente der Nachbarn `j`, deren Spalten `N(j)` sind. Beispiel 1D, Horizont 1·Δx:
+  `f_4 = (σ_5 − σ_3)/2 = E/4 (u_2 − 2u_4 + u_6)`, also `K_42 ≠ 0` ohne Bond 4–2
+  (Test `ut_Correspondence_Elastic`).
 
 - **A3.7** Folgen für die Schnittstelle:
   - Freiheitsgrade gehören zu **DOF-Trägern** (Materialpunkte *oder* Kontrollpunkte). Ein
     Element ist an einen Integrationspunkt gebunden, nicht zwingend an einen DOF-Träger.
   - `row_dofs` und `col_dofs` sind beliebige Listen; `K_e` ist dicht und rechteckig
     (IGA-PD: `K_e = w_x · N(x) · g(x)ᵀ`, siehe IGA_PD `bar_plane/src/IGAPD.jl`).
-  - Einträge in Zeilen fremder Ranks (A4.0b) sind damit **Pflicht**, nicht optional.
+  - Verteilt: siehe A4.0b (1-Horizont-Ghosts, Teilsummen der Ghost-Zeilen werden im Löser
+    zum Eigentümer addiert).
   - Ein Element meldet seine DOF-Listen in einer symbolischen Phase einmal an
     (`element_dofs`); die numerische Phase liefert nur noch Werte in fester Reihenfolge.
   - Referenz für IGA-PD: Projekt `IGA_PD` (`~/julia_projects/IGA_PD`), 1D-Stab und 2D in
@@ -209,19 +260,32 @@ später ohne Umbau übernommen werden kann.
   Element-Matrizen `K_e` anhand von `row_dofs`/`col_dofs` in die globale Matrix.
 - **A4.0a** Das Besetzungsmuster wird ebenfalls nur aus `row_dofs`/`col_dofs` aller Elemente
   ermittelt (symbolische Phase), nicht aus modellspezifischem Wissen.
-- **A4.0b** Trägt ein Element in Zeilen ein, die einem anderen Rank gehören (Ghost-Zeilen),
-  werden diese Beiträge gesammelt und zum Eigentümer-Rank gesendet und dort aufaddiert.
-  Schreibt jedes Element nur in die Zeilen seines eigenen Punktes, entfällt diese
-  Kommunikation (siehe F1).
+- **A4.0b** Verteilung mit **einem Horizont Ghosts** (wie PeriLab), Entscheidung:
+  - Jeder Rank rechnet nur die Elemente seiner eigenen Punkte. Die lokale Matrix hat die
+    eigenen Zeilen **und** die Ghost-Zeilen; in den Ghost-Zeilen stehen Teilsummen
+    (Beiträge der eigenen Elemente zu den Nachbarzeilen). Keine doppelte Berechnung, keine
+    Kommunikation beim Aufbau, keine zweite Ghost-Schicht.
+  - Die gesamte Zeile existiert auf keinem Rank. Sie entsteht im Löser:
+    1. `exchange!` – Ghost-Werte von `x` von den Eigentümern (1 Horizont),
+    2. lokale SpMV über alle lokalen Zeilen,
+    3. `accumulate_ghosts!` – Ghost-Zeilen von `y` zum Eigentümer schicken und addieren
+       (Muster von PeriLab `synch_responder_to_controller`, `add = true`).
+  - Ebenso: rechte Seite, Jacobi-Diagonale, Reaktionskräfte.
+  - Bond-based: Ghost-Zeilen leer, Schritt 3 entfällt automatisch (`needs_accumulate`).
+  - Preis: zwei Austausche pro SpMV statt einem, dafür kleine Vektoren (1 Horizont) und
+    weniger Speicher als 2-Horizont-Ghosts (3D, 20³ Punkte pro Rank, δ = 3Δx: 9 576
+    statt 24 768 Ghost-Punkte).
+  - Externe Löser, die fertige Zeilen erwarten (PETSc AIJ, ILU), brauchen einen
+    zusätzlichen Schritt; PETSc MATIS nimmt diese nicht zusammengesetzte Form direkt.
 - **A4.1** Die Assemblierung läuft parallel: verteilt über MPI-Ranks und innerhalb eines
   Ranks als GPU-Kernel.
 - **A4.2** Partitionierung zeilenweise nach Punkt-Eigentümerschaft; jeder Rank besitzt seine
   Zeilen. Nachbarn auf anderen Ranks werden als Ghost-/Halo-Punkte geführt.
 - **A4.3** Die Assemblierung auf der GPU ist ohne Race-Conditions (z. B. vorab berechnete
   Zielindizes je Bond statt atomarer Additionen – offen, siehe F4). Schreibt jedes Element
-  nur in eigene Zeilen (bond-based), gibt es keine Konflikte: ein Thread pro Element genügt,
-  Färbung (PeriLab-Konzept, Variante A) ist erst für Elemente nötig, die in fremde Zeilen
-  schreiben.
+  nur in eigene Zeilen (bond-based), gibt es keine Konflikte: ein Thread pro Element genügt.
+  Umgesetzt: Gather über vorberechnete Zuordnung (ein Work-Item pro Matrixeintrag), damit
+  auch für Elemente, die in Nachbarzeilen schreiben, ohne Färbung und ohne Atomics.
 - **A4.4** Keine Host↔Device-Kopien der Matrix während der Assemblierung.
 
 ### A4a – Modellreduktion
@@ -252,9 +316,10 @@ später ohne Umbau übernommen werden kann.
   `K_ff`, `K_fp` o. Ä. angelegt.
 - **A6.2** Die Aufteilung in freie (f) und vorgegebene (p) Freiheitsgrade erfolgt über
   eine Maske bzw. Indexliste (Speicher O(n_dof) als Bitmaske, nicht O(nnz)).
-- **A6.3** Die Gesamtmatrix bleibt unverändert, sodass sich Randbedingungen zwischen
-  Lastschritten ändern können, ohne neu zu assemblieren.
-- **A6.4** Vorgeschlagenes Verfahren: maskierter Operator
+- **A6.3** Die **Werte** der Randbedingungen können sich jederzeit ändern, ohne neu zu
+  assemblieren. Ändert sich die **Menge** der vorgegebenen DOFs, gilt: mit dem maskierten
+  Operator (A6.4) ohne Neuaufbau, mit Blockassemblierung (A6.6) neue symbolische Phase.
+- **A6.4** Verfahren für wechselnde RB-Mengen: maskierter Operator
   - Anwendung: `y = M_f · K · (M_f · x) + M_p · x` (M = Diagonalmaske, nur als Bitvektor
     gespeichert, in den SpMV-Kernel integriert)
   - rechte Seite (homogene Form): `b = M_f · (f − K · (M_p · u_p))`, also `b_p = 0`
@@ -264,6 +329,66 @@ später ohne Umbau übernommen werden kann.
   - Damit ist kein Arbeitsvektor und keine zusätzliche Matrix nötig.
 - **A6.5** Reaktionskräfte an den vorgegebenen Freiheitsgraden sind aus der vollen Matrix
   berechenbar (`r_p = M_p · (K u − f)`).
+- **A6.6** Für **feste** Randbedingungen (Menge `p` über die Rechnung konstant):
+  **Blockassemblierung**. Die symbolische Phase verteilt die Elementwerte direkt in die
+  Blöcke `K_ff`, `K_fp`, `K_pf`, `K_pp` mit neu nummerierten Indizes.
+  - Zusammen genauso viele Einträge wie `K`, keine Kopie, kein Ausschneiden.
+  - `K_ff` ist eine echte Matrix → jeder Löser und Vorkonditionierer ist nutzbar
+    (Direktlöser, ILU, AMG, PETSc/HYPRE).
+  - rechte Seite `f_f − K_fp u_p`, Reaktionen `r_p = K_pf u_f + K_pp u_p − f_p`.
+  - Ändert sich die **Menge** `p`, muss die symbolische Phase neu laufen.
+  - Allgemein: Jeder DOF bekommt ein Label (vorgegeben / Master / kondensiert), daraus
+    bis zu 3×3 Blöcke; damit liefert dieselbe Assemblierung auch `K_mm`, `K_ms`, `K_sm`,
+    `K_ss` für die Reduktion (A4a) ohne `extract`.
+- **A6.7** Der maskierte Operator (A6.4) bleibt als Variante für Randbedingungen, deren
+  Menge sich häufig ändert.
+
+### A6a – Veränderliche Zustände: Schädigung und additive Fertigung
+- **A6a.1 Schädigung** ändert nur Werte (`ω_ij = 0` in der Elementmatrix), nie das
+  Besetzungsmuster.
+- **A6a.2 Status-Maske im Gather-Kernel:** DOFs, die zur Laufzeit aus dem System fallen
+  (Punkt hat alle Bonds verloren → Nullzeile), werden über eine Maske (O(n)) beim
+  Einsammeln behandelt: Zeile und Spalte 0, Diagonale 1. Die Diagonale ist immer im
+  Muster. Die Matrix bleibt eine echte Matrix (alle Löser nutzbar), das Muster bleibt,
+  keine Kopie (wie PETSc `MatZeroRowsColumns`, aber direkt beim Aufbau).
+- **A6a.3 Additive Fertigung – wachsende Matrix:**
+  - DOFs werden **nach Aktivierungszeitpunkt** nummeriert (bekannt aus Baubahn / G-Code),
+    sodass die aktiven DOFs immer `1:n_active` sind.
+  - Das Muster wird einmal für die Endgeometrie gebaut, Spalten pro Zeile sortiert.
+  - Die aktive Matrix ist der linke obere Block `K[1:n_active, 1:n_active]`, aber **nicht**
+    als Indexierung (bei `SparseMatrixCSC` wäre das eine Kopie), sondern als
+    **Präfix-Sicht** auf dieselben CSR-Arrays: ein Struct mit `rowptr`, `colval`, `nzval`
+    und `n_active` (O(1) Speicher). Die Kernel laufen über die Zeilen `1:n_active` und
+    brechen pro Zeile ab, sobald `colval[k] > n_active`.
+  - Wachsen = `n_active` erhöhen. Assemblierung, SpMV, Löser und Vektoren (Views auf
+    `1:n_active`) arbeiten nur auf dem aktiven Teil. Bonds zu inaktiven Punkten fallen
+    automatisch weg.
+  - Grenzen: Speicher für die Endgeometrie wird von Anfang an reserviert, Rechenzeit fällt
+    nur für den aktiven Teil an. Externe Direktlöser (UMFPACK, Pardiso) brauchen eine
+    eigenständige Matrix und damit eine Kopie des Blocks; Krylov-Löser und eigene
+    Vorkonditionierer (Jacobi, ILU(0)) arbeiten direkt auf der Präfix-Sicht. Ist die
+    Endgeometrie für den Speicher zu groß: echtes Wachstum mit erneuter symbolischer
+    Phase alle paar Schichten.
+  - Kombinierbar mit A6.6 (feste RB als Blöcke) und A6a.2 (Status-Maske).
+
+### A6b – Nichtlineare Probleme
+- **A6b.1** Newton-Verfahren mit wählbarer Strategie: volles Newton (Neuaufbau und neue
+  Faktorisierung bzw. neuer Vorkonditionierer pro Iteration), modifiziertes Newton (einmal
+  pro Lastschritt), Anfangssteifigkeit. Nie `K⁻¹` bilden, immer lösen.
+- **A6b.2** Die numerische Assemblierung muss schnell sein (Neuaufbau pro Iteration);
+  Muster und symbolische Analyse werden wiederverwendet.
+- **A6b.3** Wiederverwendung über Iterationen/Lastschritte: symbolische Faktorisierung
+  (Direktlöser: nur numerisch neu faktorisieren), Vorkonditionierer (neu nur bei
+  steigender Iterationszahl), letzte Lösung als Startwert.
+- **A6b.4** Teilweises Neueinsammeln: nur geänderte Elemente neu berechnen und nur die
+  Matrixeinträge neu einsammeln, die sie berühren (Zuordnung aus dem Muster). Ergebnis
+  bitgleich zum vollständigen Neuaufbau, keine Rundungsdrift (im Unterschied zu
+  „alt abziehen, neu addieren“).
+- **A6b.5** Eine lokale Aktualisierung der LU-Faktoren gibt es für nicht-symmetrische
+  Matrizen praktisch nicht. Hebel bei lokaler Nichtlinearität: den linearen Bereich
+  einmal kondensieren (Schur-Komplement wie A4a) und pro Iteration nur den nichtlinearen
+  Rest plus Schnittstelle neu faktorisieren. Woodbury / Rang-k-Update nur bei sehr wenigen
+  geänderten DOFs.
 
 ### A7 – Verifikation und Performance
 - **A7.1** Testfälle: kleines Problem mit bekannter Lösung, Vergleich gegen serielle
@@ -311,12 +436,12 @@ später ohne Umbau übernommen werden kann.
 
 ## Offene Fragen
 
-- **F1** Schreibt ein Element nur in die Zeilen seines eigenen Punktes `i`, oder auch in die
-  Zeilen der Nachbarn (z. B. Bond-Kraft `t_ij` wirkt auf `i` und `j`)? Ersteres spart die
-  Rückkommunikation der Ghost-Zeilen. *Für bond-based geklärt: nur eigene Zeilen (A3.5).
-  Für state-based/Korrespondenz später erneut prüfen; die Assemblierung unterstützt
-  beides (A4.0b).*
-- **F2** ~~Format/Paket~~ – vorläufig geklärt: `PartitionedArrays.jl` (A8.3), Test A7.4 offen.
+- **F1** ~~Eigene Zeilen oder Nachbarzeilen?~~ – geklärt: bond-based nur eigene Zeilen;
+  Korrespondenz/Ordinary/IGA-PD auch Nachbarzeilen, verteilt über 1-Horizont-Ghosts mit
+  Rückaddition im Löser (A4.0b).
+- **F2** ~~Format/Paket~~ – geklärt: eigene CSR-Matrix + eigener Ghost-Austausch mit `MPI.jl`
+  (klein, GPU-fähig, Format wie PeriLab `overlap_map`); `PartitionedArrays.jl` wird nicht
+  verwendet. A8.3/A8.4 sind damit überholt.
 - **F3** ~~CSR/BSR~~ – geklärt: CSR, in BSR umwandelbar gehalten (A2.4).
 - **F4** ~~GPU-Assemblierung~~ – vorläufig geklärt: vorberechnete Zielindizes als
   `VectorOfVectors` (A8.2).

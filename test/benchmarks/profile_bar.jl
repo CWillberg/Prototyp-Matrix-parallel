@@ -22,8 +22,10 @@ array_type = ("gpu" in ARGS && CUDA.functional()) ? CuArray : Array
 data = bar_data(n)
 el = BondbasedElastic(1)
 p = [1, n]
-u_full = zeros(n); u_full[p] = [0.0, 100.0]
-f = zeros(n); f[div(n, 2)] = 10.0
+u_full = zeros(n);
+u_full[p] = [0.0, 100.0]
+f = zeros(n);
+f[div(n, 2)] = 10.0
 
 # --- Vorbereitung (einmal, darf allozieren) --------------------------------------
 rows, cols = element_dofs(el, data)
@@ -33,8 +35,10 @@ d = adapt(array_type, data)
 K = create_matrix(pattern)
 ke = create_element_buffer(pattern)
 bc = adapt(array_type, create_dof_set(p, n))
-u_dev = adapt(array_type, u_full); f_dev = adapt(array_type, f)
-b = similar(f_dev); r = similar(f_dev)
+u_dev = adapt(array_type, u_full);
+f_dev = adapt(array_type, f)
+b = similar(f_dev);
+r = similar(f_dev)
 workspace = LinearSolverWorkspace(n, typeof(b); memory = 50)
 
 function step!()
