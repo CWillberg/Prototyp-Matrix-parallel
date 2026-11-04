@@ -8,7 +8,8 @@
 #   mpiexecjl -n 2 julia --project=test/mpi test/mpi/scenarios.jl gpu         # GPU ranks
 #   mpiexecjl -n 2 julia --project=test/mpi test/mpi/scenarios.jl bar_nonsym memory timer
 #
-# Arguments (any order): `cpu` | `gpu`, scenario names (default: all), `timer` (prints the
+# Arguments (any order): `cpu` | `gpu` | `mixed` (one rank per GPU on the GPU, the others on
+# the CPU, coupled through the same halo exchange), scenario names (default: all), `timer` (prints the
 # TimerOutputs table of rank 0). Exit code 1 if any check fails.
 
 using MPI
@@ -25,12 +26,13 @@ const COMM = MPI.COMM_WORLD
 const RANK = MPI.Comm_rank(COMM)
 const N_RANKS = MPI.Comm_size(COMM)
 
-const USE_GPU = "gpu" in ARGS
-if USE_GPU
+const BACKEND = "mixed" in ARGS ? "mixed" : ("gpu" in ARGS ? "gpu" : "cpu")
+if BACKEND != "cpu"
     using CUDA
 end
-const ARRAY_TYPE = USE_GPU ? CuArray : Array
-const BACKEND = USE_GPU ? "gpu" : "cpu"
+include(joinpath(@__DIR__, "backend.jl"))
+const ARRAY_TYPE, ON_GPU, DEVICE = select_backend(BACKEND, COMM)
+const N_GPU_RANKS = MPI.Allreduce(Int(ON_GPU), +, COMM)
 
 include(joinpath(@__DIR__, "..", "helper.jl"))
 include(joinpath(@__DIR__, "scenario_helper.jl"))
@@ -44,7 +46,8 @@ function check(scenario::String, what::String, ok::Bool, detail::String = "")
     all_ok || (FAILURES[] += 1)
     if RANK == 0 && !QUIET[]
         println(all_ok ? "[PASS] " : "[FAIL] ", rpad(scenario, 12), " ranks=", N_RANKS,
-                " ", BACKEND, "  ", what, isempty(detail) ? "" : "  ($detail)")
+                " ", BACKEND, BACKEND == "mixed" ? "($(N_GPU_RANKS) gpu)" : "", "  ", what,
+                isempty(detail) ? "" : "  ($detail)")
     end
     return all_ok
 end

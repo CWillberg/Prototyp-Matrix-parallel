@@ -62,9 +62,11 @@ end
 function check_bond_lengths(coordinates::AbstractMatrix{Float64},
                             nlist::VectorOfVectors{Int64})
     for (i, neighbors) in enumerate(nlist), j in neighbors
-        if all(coordinates[:, i] .== coordinates[:, j])
-            throw(ArgumentError("Bond $(i)-$(j) has zero length."))
+        same = true
+        for a in axes(coordinates, 1)
+            same &= coordinates[a, i] == coordinates[a, j]
         end
+        same && throw(ArgumentError("Bond $(i)-$(j) has zero length."))
     end
 end
 

@@ -71,6 +71,45 @@ Auf einem Rechner mit einer GPU teilen sich mehrere GPU-Ranks dieselbe GPU: Das 
 Korrektheit, nicht die Leistung. Ohne CUDA-aware MPI läuft der Ghost-Austausch über
 vorab angelegte Host-Puffer (F6).
 
+### Studie: 1 CPU als Referenz, dann nur MPI, nur CUDA, gemischt
+
+```sh
+julia --project=test/scaling test/scaling/run_study.jl          # lokal
+sbatch test/scaling/slurm_study.sh                              # Cluster
+```
+
+Pro Problemgröße: Referenz mit 1 CPU-Rank, dann CPU-Ranks (`cpu_ranks`), GPU-Ranks
+(`gpu_ranks`, eine GPU pro Rank) und gemischt (`mixed_ranks`, ein Rank pro GPU auf der GPU,
+der Rest auf der CPU). Ergebnis in `results/study/`: CSV, eine Tabelle in der Konsole
+(Lösungszeit und Speedup gegenüber 1 CPU) und ein Plot (Spalten = Problemgröße, Zeilen =
+Lösungszeit und Speedup, Linien = MPI / CUDA / gemischt, gestrichelt = Referenz).
+Lokal: `dofs=1000,3000,10000 cpu_ranks=2,4 gpu_ranks=1 mixed_ranks=2,4`.
+
+### Skalierungsstudie (ein Startskript)
+
+```sh
+julia --project=test/scaling -e 'using Pkg; Pkg.instantiate()'        # einmal
+julia --project=test/scaling test/scaling/run_scaling.jl               # alles durchspielen
+```
+
+Spielt alle Kombinationen aus Backend (`cpu`, `gpu`, `mixed`), Ranks und DOFs durch, schreibt
+`results/scaling/scaling_<zeit>.csv` und erzeugt daraus
+`results/scaling/scaling_<zeit>_<dim>D_<element>.png` (Lösungszeit und Zeit pro Iteration über
+der Zahl der Ranks, eine Linie pro Problemgröße, Spalten = Backend).
+Standard lokal: Ranks 1, 2, 4; DOFs 1 000 / 3 000 / 10 000; 2D bond-based.
+
+- Jeder Rank erzeugt nur seine eigenen Punkte und Ghosts (strukturiertes Gitter, Scheiben
+  entlang x); es gibt keine globalen Daten und keine globale Referenz. Geprüft werden
+  Konvergenz, wahres Residuum der freien DOFs und exakte Vorgabewerte.
+- `mixed`: pro Knoten ein Rank je GPU auf der GPU, die übrigen Ranks auf der CPU, gekoppelt
+  über denselben Ghost-Austausch; `gpu_weight` gibt GPU-Ranks mehr Punkte.
+- GPU-Zuordnung: Gerät = Rank innerhalb des Knotens mod Anzahl GPUs.
+- CSV-Spalten: Setup-, Assemblierungs-, Lösungszeit, Iterationen, Zeit pro Iteration,
+  Kommunikationszeit im Löser, Speicher (max. Rank / Summe), Residuum.
+- Optionen: `ranks=`, `dofs=`, `backends=`, `dims=`, `element=bb|corr`, `gpu_weight=`,
+  `launcher=mpiexec|srun`, `threads=`, `horizon=`, `rtol=`, `itmax=`, `out=`.
+- Cluster: `test/scaling/slurm_scaling.sh` (System-MPI über `MPIPreferences`, `launcher=srun`).
+
 Ablauf seriell (siehe `test/helper.jl`, `solve_bar`):
 
 1. Host, symbolisch: `element_dofs(el, data)` → `create_assembly_pattern` (einmal).

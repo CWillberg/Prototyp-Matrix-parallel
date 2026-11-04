@@ -5,19 +5,19 @@
 # Runs all distributed scenarios for several rank counts and backends and prints a summary.
 #
 #   julia --project=test/mpi test/mpi/run_scenarios.jl              # CPU, ranks 1 2 4
-#   julia --project=test/mpi test/mpi/run_scenarios.jl cpu gpu      # CPU and GPU ranks
+#   julia --project=test/mpi test/mpi/run_scenarios.jl cpu gpu mixed  # CPU, GPU, coupled
 #   julia --project=test/mpi test/mpi/run_scenarios.jl gpu ranks=1,2
 #
 # Further arguments (scenario names, `timer`) are passed on to scenarios.jl.
 
 using MPI: mpiexec
 
-backends = filter(in(("cpu", "gpu")), ARGS)
+backends = filter(in(("cpu", "gpu", "mixed")), ARGS)
 isempty(backends) && (backends = ["cpu"])
 rank_arg = findfirst(startswith("ranks="), ARGS)
 ranks = isnothing(rank_arg) ? [1, 2, 4] :
         parse.(Int, split(split(ARGS[rank_arg], "=")[2], ","))
-passthrough = filter(a -> !(a in ("cpu", "gpu")) && !startswith(a, "ranks="), ARGS)
+passthrough = filter(a -> !(a in ("cpu", "gpu", "mixed")) && !startswith(a, "ranks="), ARGS)
 
 script = joinpath(@__DIR__, "scenarios.jl")
 project = @__DIR__
