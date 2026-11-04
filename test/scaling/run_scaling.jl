@@ -62,7 +62,7 @@ for dim in dims, backend in backends, n in ranks, d in dofs
     case = `$script dim=$dim dofs=$d backend=$backend element=$element gpu_weight=$gpu_weight csv=$csv $passthrough`
     run_cmd = launcher == "srun" ?
               `srun -n $n $julia --project=$project -t $threads $case` :
-              `$(mpiexec()) -n $n $julia --project=$project -t $threads $case`
+              `$(mpiexec()) -bind-to core -n $n $julia --project=$project -t $threads $case`
     ok = success(pipeline(run_cmd; stdout = stdout, stderr = stderr))
     ok || push!(failed, "dim=$dim backend=$backend ranks=$n dofs=$d")
 end

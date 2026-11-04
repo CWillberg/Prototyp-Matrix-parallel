@@ -1,0 +1,2 @@
+timestamp,dim,element,backend,ranks,gpu_ranks,threads,dofs,dofs_per_rank_max,nx,ny,nz,horizon,t_setup,t_assembly,t_solve,iterations,t_iteration,t_comm,mem_rank_max_MB,mem_total_MB,residual,prescribed_exact,solved
+2026-11-04T14:31:59,2,bb,mixed,56,1,1,1001112,560736,1414,354,1,3,8.679698712000118,0.02795526099998824,7.784886373000063,988,0.007879439648785489,0.378306144,1428.1643333435059,2581.3136596679688,8.834378494609651e-9,true,true
